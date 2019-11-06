@@ -31,4 +31,4 @@ See [KinesisAnalyticsExample/README.md](KinesisAnalyticsExample/README.md) for i
 
 ## Device Shadows
 
-Sample iOS and Arduino code for using device shadows can be found in the [aws-mobile-iot](https://github.com/chariotsolutions/aws-mobile-iot)repo.
+Sample iOS and Arduino code for using device shadows can be found in the [aws-mobile-iot](https://github.com/chariotsolutions/aws-mobile-iot) repo.
