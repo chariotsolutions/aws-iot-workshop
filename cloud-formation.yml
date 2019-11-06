@@ -1,0 +1,288 @@
+AWSTemplateFormatVersion:               "2010-09-09"
+Description:                            "Creates skeleton solution for Chariot Solutions 'IoT on AWS' workshop"
+
+Parameters:
+
+  StreamName:
+    Description:                        "Name of the Kinesis stream"
+    Type:                               "String"
+    Default:                            "iot-data"
+
+  DynamoTableName:
+    Description:                        "Name of the DynamoDB table"
+    Type:                               "String"
+    Default:                            "environment"
+
+  InfluxLambdaName:
+    Description:                        "Name of the Lamba Function that writes data from Kinesis to InfluxDB"
+    Type:                               "String"
+    Default:                            "kinesis-to-influxdb" 
+
+  PostgresLambdaName:
+    Description:                        "Name of the Lamba Function that writes data from Kinesis to PostgreSQL"
+    Type:                               "String"
+    Default:                            "kinesis-to-postgres" 
+
+Resources:
+
+  KinesisStream:
+    Type:                               "AWS::Kinesis::Stream"
+    Properties:
+      Name:                             !Ref StreamName
+      ShardCount:                       1
+
+  KinesisWriterPolicy:
+    Type:                               "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName:                !Sub "KinesisWriter-${StreamName}"
+      Description:                      "Allows logger to write the example Kinesis stream"
+      PolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          -
+            Effect:                     "Allow"
+            Action:
+              -                         "kinesis:CreateStream"
+              -                         "kinesis:DescribeStream"
+              -                         "kinesis:IncreaseStreamRetentionPeriod"
+              -                         "kinesis:PutRecords"
+              -                         "kinesis:PutRecord"
+            Resource:                   !GetAtt KinesisStream.Arn
+
+  KinesisReaderPolicy:
+    Type:                               "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName:                !Sub "KinesisReader-${StreamName}"
+      Description:                      "Allows reading the example Kinesis stream"
+      PolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          -
+            Effect:                     "Allow"
+            Action:
+              -                         "kinesis:ListStreams"
+              -                         "kinesis:DescribeStream"
+              -                         "kinesis:GetShardIterator"
+              -                         "kinesis:GetRecords"
+            Resource:                   !GetAtt KinesisStream.Arn
+
+  DynamoTable:
+    Type:                               "AWS::DynamoDB::Table"
+    Properties:
+      TableName:                        !Ref DynamoTableName
+      AttributeDefinitions:
+        -
+          AttributeName:                "device"
+          AttributeType:                "S"
+        -
+          AttributeName:                "timestamp"
+          AttributeType:                "N"
+      KeySchema:
+        -
+          AttributeName:                "device"
+          KeyType:                      "HASH"
+        -
+          AttributeName:                "timestamp"
+          KeyType:                      "RANGE"
+      ProvisionedThroughput:
+        ReadCapacityUnits:              10
+        WriteCapacityUnits:             5
+
+  DynamoWriterPolicy:
+    Type:                               "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName:                !Sub "DynamoWriter-${DynamoTableName}"
+      Description:                      "Allows writes to the example DynamoDB table"
+      PolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          -
+            Effect:                     "Allow"
+            Action:
+              -                         "dynamodb:PutItem"
+            Resource:                   !GetAtt DynamoTable.Arn
+
+  DynamoReaderPolicy:
+    Type:                               "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName:                !Sub "DynamoReader-${DynamoTableName}"
+      Description:                      "Allows reading the example DynamoDB table"
+      PolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          -
+            Effect:                     "Allow"
+            Action:
+                -                       "dynamodb:GetItem"
+                -                       "dynamodb:Query"
+                -                       "dynamodb:Scan"
+            Resource:                   !GetAtt DynamoTable.Arn
+
+  # this is global
+  IoTCoreExecutionRole:
+    Type:                               "AWS::IAM::Role"
+    Properties:
+      RoleName:                         "iot-core-execution-role"
+      AssumeRolePolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          Effect:                       "Allow"
+          Action:                       "sts:AssumeRole"
+          Principal:
+            Service:                    "iot.amazonaws.com"
+      ManagedPolicyArns:
+        -                               !Ref DynamoWriterPolicy
+        -                               !Ref KinesisWriterPolicy
+
+  InfluxLambdaRole:
+    Type:                               "AWS::IAM::Role"
+    Properties:
+      Path:                             "/lambda/"
+      RoleName:                         !Sub "${InfluxLambdaName}-ExecutionRole"
+      AssumeRolePolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          Effect:                       "Allow"
+          Principal:
+            Service:                    "lambda.amazonaws.com"
+          Action:                       "sts:AssumeRole"
+      ManagedPolicyArns:
+        -                               "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        -                               !Ref KinesisReaderPolicy
+
+  PostgresLambdaRole:
+    Type:                               "AWS::IAM::Role"
+    Properties:
+      Path:                             "/lambda/"
+      RoleName:                         !Sub "${PostgresLambdaName}-ExecutionRole"
+      AssumeRolePolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          Effect:                       "Allow"
+          Principal:
+            Service:                    "lambda.amazonaws.com"
+          Action:                       "sts:AssumeRole"
+      ManagedPolicyArns:
+        -                               "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        -                               !Ref KinesisReaderPolicy
+
+  InfluxLambdaFunction:
+    Type:                               "AWS::Lambda::Function"
+    Properties: 
+      FunctionName:                     !Ref InfluxLambdaName
+      Description:                      "Lambda triggered by Kinesis stream that writes data to InfluxDB."
+      Role:                             !GetAtt InfluxLambdaRole.Arn
+      # Layer is a public Chariot Solutions layer that contains PostgreSQL and InfluxDB
+      Layers:
+        -                               arn:aws:lambda:us-east-1:366425516243:layer:IotWorkshopLayer:1
+      Runtime:                          "python3.7"
+      Handler:                          "index.lambda_handler"
+      Code:
+        ZipFile: |
+          import json
+          import base64
+
+          def lambda_handler(event, context):
+            # log the event
+            print(json.dumps(event))
+            
+            # decode and log each record
+            for record in event['Records']:
+                payload = record['kinesis']['data']
+                decoded = base64.b64decode(payload)
+                data = json.loads(decoded)
+                print(data)
+                # save_to_influx(data)
+      MemorySize:                       128
+      Timeout:                          60
+      Environment: 
+        Variables:                      
+          INFLUXDB_HOSTNAME:            "iot.chariotsolutions.dev"
+          INFLUXDB_USER:                "student"
+          INFLUXDB_PASSWORD:            "hydrogen-5"
+          INFLUXDB_DATABASE:            "workshop"
+
+  PostgresLambdaFunction:
+    Type:                               "AWS::Lambda::Function"
+    Properties: 
+      FunctionName:                     !Ref PostgresLambdaName
+      Description:                      "Lambda triggered by Kinesis stream that writes data to PostgreSQL"
+      Role:                             !GetAtt PostgresLambdaRole.Arn
+      # Layer is a public Chariot Solutions layer that contains PostgreSQL and InfluxDB
+      Layers:
+        -                               arn:aws:lambda:us-east-1:366425516243:layer:IotWorkshopLayer:1
+      Runtime:                          "python3.7"
+      Handler:                          "index.lambda_handler"
+      Code:
+        ZipFile: |
+          import json
+          import base64
+
+          def lambda_handler(event, context):
+            # log the event
+            print(json.dumps(event))
+            
+            # decode and log each record
+            for record in event['Records']:
+                payload = record['kinesis']['data']
+                decoded = base64.b64decode(payload)
+                data = json.loads(decoded)
+                print(data)
+                # save_to_postgres(data)
+
+      MemorySize:                       128
+      Timeout:                          60
+      Environment: 
+        Variables:                      
+          POSTGRESQL_HOSTNAME:            "workshop.cwjhgjkfwasa.us-east-1.rds.amazonaws.com"
+          POSTGRESQL_USER:                "student"
+          POSTGRESQL_PASSWORD:            "lemon.box"
+          POSTGRESQL_DATABASE:            "workshop"
+
+
+  # The event source block attaches a trigger to a lambda, but it fails on the initial import because Kinesis takes too long to create the stream
+  # EventSource:
+  #   Type:                               "AWS::Lambda::EventSourceMapping"
+  #   Properties: 
+  #     EventSourceArn:                   !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${StreamName}" 
+  #     FunctionName:                     !Ref InfluxLambdaFunction
+  #     Enabled:                          true
+  #     StartingPosition:                 LATEST
+  #     BatchSize:                        100
+  #     MaximumBatchingWindowInSeconds:   30
+
+  # Restrictive policy for devices
+  ThingPolicy:
+    Type: 'AWS::IoT::Policy'
+    Properties:
+      PolicyName: ThingPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 'iot:Connect'
+            Resource:
+              - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:client/${!iot:Certificate.Subject.CommonName}'
+          - Effect: Allow
+            Action:
+              - 'iot:Publish'
+              - 'iot:Receive'
+            Resource: 
+              - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/things/${!iot:ClientId}/*'
+          - Effect: Allow
+            Action: 'iot:Subscribe'
+            Resource: 
+              - !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/things/${!iot:ClientId}/*'
+
+  # Wide open policy for debugging Things
+  AllowAllPolicy:
+    Type: 'AWS::IoT::Policy'
+    Properties:
+      PolicyName: AllowAllPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: 'iot:*'
+            Resource:
+              - '*'
