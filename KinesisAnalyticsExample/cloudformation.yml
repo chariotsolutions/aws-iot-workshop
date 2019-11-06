@@ -1,0 +1,253 @@
+AWSTemplateFormatVersion:               "2010-09-09"
+Description:                            "A Kinesis Analytics application that will invoke a Lambda when lux levels are low"
+
+Parameters:
+
+  BaseName:
+    Description:                        "Base name for all resources created by application"
+    Type:                               "String"
+    Default:                            "LightsOut"
+
+  LuxThreshold:
+    Description:                        "The lux value that will trigger a notification"
+    Type:                               "Number"
+    Default:                            10
+
+  SourceStream:
+    Description:                        "The Kinesis stream that will be read by the application"
+    Type:                               "String"
+    Default:                            "iot-data"
+
+  DestinationEmail:
+    Description:                        "Destination email address for notifications"
+    Type:                               "String"
+
+Resources:
+
+  ##
+  ## Kinesis Analytics application
+  ##
+
+  AnalyticsApplicationRole:
+    Type:                               "AWS::IAM::Role"
+    Properties:
+      Path:                             "/lambda/"
+      RoleName:                         !Sub "${BaseName}-AnalyticsApplicationRole"
+      AssumeRolePolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          Effect:                       "Allow"
+          Principal:
+            Service:                    "kinesisanalytics.amazonaws.com"
+          Action:                       "sts:AssumeRole"
+      Policies:
+        -
+          PolicyName:                   "ReadKinesis"
+          PolicyDocument:
+            Version:                    "2012-10-17"
+            Statement:
+              Effect:                   "Allow"
+              Action:
+                -                       "kinesis:DescribeStream"
+                -                       "kinesis:GetShardIterator"
+                -                       "kinesis:GetRecords"
+              Resource:                 !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${SourceStream}"
+        -
+          PolicyName:                   "InvokeLambda"
+          PolicyDocument:
+            Version:                    "2012-10-17"
+            Statement:
+              Effect:                   "Allow"
+              Action:
+                -                       "lambda:InvokeFunction"
+                -                       "lambda:GetFunctionConfiguration"
+              Resource:
+                -                       !GetAtt LambdaFunction.Arn
+                -                       !Sub "${LambdaFunction.Arn}:$LATEST"
+
+  AnalyticsApplication:
+    Type:                               "AWS::KinesisAnalytics::Application"
+    Properties: 
+      ApplicationName:                  !Sub "${BaseName}"
+      ApplicationDescription:           "Invokes a Lambda function if the reported lux value from a device drops below a given level"
+      Inputs:
+        -
+          KinesisStreamsInput: 
+            ResourceARN:                !Sub "arn:aws:kinesis:${AWS::Region}:${AWS::AccountId}:stream/${SourceStream}"
+            RoleARN:                    !GetAtt AnalyticsApplicationRole.Arn
+          NamePrefix:                   !Ref BaseName
+          InputSchema: 
+            RecordFormat: 
+              RecordFormatType:         "JSON"
+              MappingParameters:
+                JSONMappingParameters:
+                  RecordRowPath: "$"
+            RecordColumns: 
+              -
+                Name:                   DEVICE
+                SqlType:                "VARCHAR(36)"
+                Mapping:                "$.device"
+              -
+                Name:                   RECORDED_AT
+                SqlType:                "BIGINT"
+                Mapping:                "$.timestamp"
+              -
+                Name:                   TEMPERATURE
+                SqlType:                "REAL"
+                Mapping:                "$.temperature"
+              -
+                Name:                   HUMIDITY
+                SqlType:                "REAL"
+                Mapping:                "$.humidity"
+              -
+                Name:                   PRESSURE
+                SqlType:                "REAL"
+                Mapping:                "$.pressure"
+              -
+                Name:                   LUX
+                SqlType:                "REAL"
+                Mapping:                "$.lux"
+      ApplicationCode:                  !Sub
+                                        | 
+                                        CREATE OR REPLACE STREAM "LUX_MONITOR_OUTPUT"
+                                        (
+                                            DEVICE          varchar(36),
+                                            RECORDED_AT     bigint,
+                                            TEMPERATURE     decimal(6,2), 
+                                            HUMIDITY        decimal(6,2), 
+                                            PRESSURE        decimal(6,2), 
+                                            LUX             decimal(6,2)
+                                        );
+                                        
+                                        CREATE OR REPLACE PUMP "LUX_MONITOR_PUMP" AS 
+                                            insert  into LUX_MONITOR_OUTPUT 
+                                                    ( DEVICE, RECORDED_AT, TEMPERATURE, HUMIDITY, PRESSURE, LUX )
+                                            select  DEVICE, RECORDED_AT, TEMPERATURE, HUMIDITY, PRESSURE, LUX 
+                                            from    "${BaseName}_001"
+                                            where   LUX < ${LuxThreshold};
+
+
+  AnalyticsDestination:
+    Type:                             "AWS::KinesisAnalytics::ApplicationOutput"
+    Properties: 
+      ApplicationName:                !Ref AnalyticsApplication
+      Output: 
+        Name:                         !Sub "${BaseName}_Lambda"
+        LambdaOutput: 
+          ResourceARN:                !GetAtt LambdaFunction.Arn
+          RoleARN:                    !GetAtt AnalyticsApplicationRole.Arn
+        DestinationSchema: 
+          RecordFormatType:           "JSON"
+
+  ##
+  ## Lambda
+  ##
+
+  LambdaLogGroup:
+    Type:                               "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName:                     !Sub "/aws/lambda/${BaseName}"
+      RetentionInDays:                  3
+
+  LambdaRole:
+    Type:                               "AWS::IAM::Role"
+    Properties:
+      Path:                             "/lambda/"
+      RoleName:                         !Sub "${BaseName}-LambdaExecutionRole"
+      AssumeRolePolicyDocument:
+        Version:                        "2012-10-17"
+        Statement:
+          Effect:                       "Allow"
+          Principal:
+            Service:                    "lambda.amazonaws.com"
+          Action:                       "sts:AssumeRole"
+      ManagedPolicyArns:
+        -                               "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        -
+          PolicyName:                   "SendNotification"
+          PolicyDocument:
+            Version:                    "2012-10-17"
+            Statement:
+              Effect:                   "Allow"
+              Action:                   "sns:Publish"
+              Resource:                 !Ref SNSTopic
+
+  LambdaFunction:
+    Type:                               "AWS::Lambda::Function"
+    Properties: 
+      FunctionName:                     !Sub "${BaseName}"
+      Description:                      "Responds to events by creating an SNS notification"
+      Role:                             !GetAtt LambdaRole.Arn
+      Runtime:                          "python3.7"
+      Handler:                          "index.lambda_handler"
+      Code: 
+        ZipFile:                        |
+                                        import base64
+                                        import boto3
+                                        import json
+                                        import logging
+                                        import os
+                                        
+                                        from datetime import datetime, timezone
+                                        
+                                        
+                                        logger = logging.getLogger()
+                                        logger.setLevel(logging.INFO)
+                                        
+                                        snsTopicArn = os.environ['SNS_TOPIC_ARN']
+                                        snsTopic = boto3.resource('sns').Topic(snsTopicArn)
+                                        
+                                        ## this is a hack to prevent repeated notifications for the same device
+                                        ## a production app would use a DynamoDB table or equivalent
+                                        recentNotifications = set()
+                                        
+                                        
+                                        def lambda_handler(event, context):
+                                            # logging.info(json.dumps(event))
+                                            records = event.get('records', [])
+                                            results = [process_record(record) for record in records]
+                                            return { 'records': results }
+                                        
+                                        def process_record(record):
+                                            recordId = record['recordId']
+                                            try:
+                                                data = base64.b64decode(record['data'])
+                                                parsed = json.loads(data)
+                                                send_notification(parsed['DEVICE'], parsed['RECORDED_AT'], parsed['LUX'])
+                                                return { 'recordId': recordId, 'result': 'Ok' }
+                                            except:
+                                                logging.error(f'failed to process record: {json.dumps(record)}', exc_info=True)
+                                                return { 'recordId': recordId, 'result': 'DeliveryFailed' }
+                                        
+                                        def send_notification(device, recordedAt, lux):
+                                            recordedAtStr = datetime.fromtimestamp(recordedAt / 1000.0, tz=timezone.utc).isoformat()
+                                            if device in recentNotifications:
+                                                logger.info(f'received a low-lux ({lux}) notification from device {device} at {recordedAtStr}; skipping because we already processed one')
+                                            else:
+                                                recentNotifications.add(device)
+                                                message = f'received a low-lux ({lux}) notification from device {device} at {recordedAtStr}'
+                                                logging.info(message)
+                                                snsTopic.publish(
+                                                    Subject='Low-Lux Notification',
+                                                    Message=message)
+
+      MemorySize:                       128
+      Timeout:                          60
+      Environment: 
+        Variables:
+          SNS_TOPIC_ARN:                !Ref SNSTopic
+
+
+  ##
+  ## Destination
+  ##
+
+  SNSTopic:
+    Type:                               "AWS::SNS::Topic"
+    Properties:
+      TopicName:                        !Sub "${BaseName}-Notifications"
+      Subscription:
+        -
+          Protocol:                     "email"
+          Endpoint:                     !Ref DestinationEmail

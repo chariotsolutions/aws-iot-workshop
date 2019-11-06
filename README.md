@@ -25,6 +25,10 @@ MKR ENV library allows us to access the sensors through a common library https:/
 
 The workshop materials will walk through connecting the Arduino MKR 1010 to [AWS IoT Core](https://aws.amazon.com/iot-core/).
 
+## Kinesis Analytics
+
+See [KinesisAnalyticsExample/README.md](KinesisAnalyticsExample/README.md) for instructions on how to run the Kinesis Analytics exercise.
+
 ## Device Shadows
 
-Sample iOS and Arduino code for using device shadows can be found here: https://github.com/chariotsolutions/aws-mobile-iot
+Sample iOS and Arduino code for using device shadows can be found in the [aws-mobile-iot](https://github.com/chariotsolutions/aws-mobile-iot)repo.
